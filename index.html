@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-    <title>Chim Bay</title>
+    <title>11-9</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
@@ -653,14 +653,6 @@
                         <div id="setStatus"></div>
                     </div>
 
-                    <div class="setSec">
-                        <h3>GIAO DIỆN</h3>
-                        <div class="seg">
-                            <button id="themeDay" type="button">☀️ Buổi trưa</button>
-                            <button id="themeNight" type="button">🌙 Buồi túi</button>
-                        </div>
-                    </div>
-
                     <div class="setSec sourceSec">
                         <div class="sourceContent">
                             <div style="font-size:16px;opacity:.8">DEV</div>
@@ -690,8 +682,9 @@
         const CUSTOM_SCORE_SOUND = "ting.mp3"; // e.g. "qua-cot.mp3"
         const CUSTOM_DEATH_SOUND = "catmemesound.mp3"; // e.g. "khi-chet.mp3"
         const CUSTOM_EXTRA_DEATH_SOUND = "chet.mp3";
+        const THUNDER_SOUND = "sét.mp3";
         const HIGH_SCORE_DEATH_SOUND = new Audio("siren head.mp3");
-        const PLANE_IMAGE_PATH = "maybay.png";
+        const PLANE_IMAGE_PATH = "vietjet.png";
         const TOWER_IMAGE_PATH = "thapdoi.png";
         const CLOUD_IMAGE_PATH = "mayyy.png";
         const CITY_IMAGE_PATH = "city.png";
@@ -772,14 +765,19 @@
         renderAuthorFacebook();
 
         /* -------------------- Cài đặt người chơi -------------------- */
-        const DEFAULT_SETTINGS = { sound: true, music: true, theme: "day" };
+        function getTimeBasedTheme() {
+            const hour = new Date().getHours();
+            return hour >= 18 || hour < 6 ? "night" : "day";
+        }
+
+        const DEFAULT_SETTINGS = { sound: true, music: true, theme: getTimeBasedTheme() };
         let settings = { ...DEFAULT_SETTINGS };
         try {
             Object.assign(settings, JSON.parse(localStorage.getItem("chimbay_settings") || "{}"));
         } catch (e) { }
         settings.sound = settings.sound !== false;
         settings.music = settings.music !== false;
-        if (settings.theme !== "day" && settings.theme !== "night") settings.theme = "day";
+        settings.theme = getTimeBasedTheme();
 
         function saveSettings() {
             try { localStorage.setItem("chimbay_settings", JSON.stringify(settings)); } catch (e) { }
@@ -792,8 +790,6 @@
         function syncSettingsUI() {
             $("soundToggle").textContent = settings.sound ? "🔊 Bật" : "🔇 Tắt";
             $("musicToggle").textContent = settings.music ? "🎵 Bật" : "🔇 Tắt";
-            $("themeDay").classList.toggle("active", settings.theme === "day");
-            $("themeNight").classList.toggle("active", settings.theme === "night");
         }
 
         /* ---------------------- Bảng xếp hạng ---------------------- */
@@ -1024,7 +1020,8 @@
             flap: CUSTOM_FLAP_SOUND ? new Audio(CUSTOM_FLAP_SOUND) : null,
             score: CUSTOM_SCORE_SOUND ? new Audio(CUSTOM_SCORE_SOUND) : null,
             death: CUSTOM_DEATH_SOUND ? new Audio(CUSTOM_DEATH_SOUND) : null,
-            extraDeath: CUSTOM_EXTRA_DEATH_SOUND ? new Audio(CUSTOM_EXTRA_DEATH_SOUND) : null
+            extraDeath: CUSTOM_EXTRA_DEATH_SOUND ? new Audio(CUSTOM_EXTRA_DEATH_SOUND) : null,
+            thunder: THUNDER_SOUND ? new Audio(THUNDER_SOUND) : null
         };
 
         /* Canvas độ phân giải cao để nét trên mọi màn hình */
@@ -1064,13 +1061,15 @@
 
         let state = "menu";            // menu | ready | play | over
         let bird, pipes, score, spawnT, deadT, playerName = "";
-        let stormActive = false;
+        const ALWAYS_RAIN_FOR_TESTING = false;
+        let stormActive = ALWAYS_RAIN_FOR_TESTING;
         let weatherTimer = 20 + Math.random() * 40;
-        let stormTimer = 0;
-        let stormDuration = 0;
+        let stormTimer = ALWAYS_RAIN_FOR_TESTING ? 60 : 0;
+        let stormDuration = ALWAYS_RAIN_FOR_TESTING ? 20 : 0;
         let stormIntensity = 0;
-        let lightningTimer = 0;
         let lightningFlash = 0;
+        let lightningX = W / 2;
+        let lightningTargetY = 245;
         const rainDrops = Array.from({ length: 48 }, () => ({
             x: Math.random() * W,
             y: Math.random() * H,
@@ -1089,6 +1088,13 @@
         let cloudSprites = [];
         let cloudsX = [-35, 40, 120, 210, 295, 370, 445];
         let gameAudio = null;
+        let thunderAnalyser = null;
+        let thunderSamples = null;
+        let thunderNoiseFloor = 0.025;
+        let previousThunderRms = 0;
+        let lastThunderStrike = -Infinity;
+        let thunderPlayPending = false;
+        let thunderPlaybackBlocked = false;
         let bonusPopups = [];
         let explosionParticles = [];
         let planeExploded = false;
@@ -1150,15 +1156,74 @@
         cityAsset.onerror = () => console.error(`Không thể tải ảnh thành phố: ${CITY_IMAGE_PATH}; dùng nhà vẽ sẵn.`);
         cityAsset.src = CITY_IMAGE_PATH;
 
-        function playCustomSound(sound, name) {
+        function playCustomSound(sound, name, volume = MASTER_VOLUME) {
             if (!sound) return false;
             if (!soundOn()) return true;
             const playback = sound.cloneNode();
-            playback.volume = MASTER_VOLUME;
+            playback.volume = Math.min(1, volume);
             playback.play().catch(error => {
                 console.error(`Không thể phát âm thanh ${name}`, error);
                 $("status").textContent = `Không phát được âm thanh ${name}`;
             });
+            return true;
+        }
+
+        function updateThunderAudio() {
+            const sound = customSounds.thunder;
+            if (!sound || !soundOn() || !stormActive) {
+                if (sound && !sound.paused) sound.pause();
+                return;
+            }
+
+            const audio = getGameAudio();
+            if (!audio) return;
+            if (!thunderAnalyser) {
+                thunderAnalyser = audio.createAnalyser();
+                thunderAnalyser.fftSize = 1024;
+                thunderSamples = new Uint8Array(thunderAnalyser.fftSize);
+                audio.createMediaElementSource(sound).connect(thunderAnalyser);
+                thunderAnalyser.connect(audio.destination);
+                sound.loop = true;
+            }
+            if (audio.state === "suspended") {
+                audio.resume().catch(error => console.error("Không thể bật âm thanh", error));
+            }
+            sound.volume = 0.35;
+            if (sound.paused && !thunderPlayPending && !thunderPlaybackBlocked) {
+                thunderPlayPending = true;
+                sound.play().then(() => {
+                    thunderPlayPending = false;
+                }).catch(error => {
+                    thunderPlayPending = false;
+                    thunderPlaybackBlocked = true;
+                    console.error("Không thể phát âm thanh mưa bão", error);
+                    $("status").textContent = "Không phát được âm thanh mưa bão";
+                });
+            }
+        }
+
+        window.addEventListener("pointerdown", () => {
+            thunderPlaybackBlocked = false;
+            if (stormActive) updateThunderAudio();
+        });
+
+        function detectThunderSound() {
+            if (!thunderAnalyser || !thunderSamples || !soundOn() || !stormActive) return false;
+            thunderAnalyser.getByteTimeDomainData(thunderSamples);
+            let sumSquares = 0;
+            for (const sample of thunderSamples) {
+                const amplitude = (sample - 128) / 128;
+                sumSquares += amplitude * amplitude;
+            }
+            const rms = Math.sqrt(sumSquares / thunderSamples.length);
+            const threshold = Math.max(0.055, thunderNoiseFloor * 1.8);
+            thunderNoiseFloor += (Math.min(rms, threshold) - thunderNoiseFloor) * 0.015;
+
+            const now = performance.now() / 1000;
+            const thunderOnset = rms >= threshold && previousThunderRms < threshold;
+            previousThunderRms = rms;
+            if (!thunderOnset || now - lastThunderStrike < 1.5) return false;
+            lastThunderStrike = now;
             return true;
         }
 
@@ -1471,9 +1536,14 @@
             if (settings.music) startBackgroundMusic();
             else stopBackgroundMusic();
         });
-        $("themeDay").addEventListener("click", () => { settings.theme = "day"; saveSettings(); syncSettingsUI(); });
-        $("themeNight").addEventListener("click", () => { settings.theme = "night"; saveSettings(); syncSettingsUI(); });
         syncSettingsUI();
+        window.setInterval(() => {
+            const theme = getTimeBasedTheme();
+            if (settings.theme === theme) return;
+            settings.theme = theme;
+            saveSettings();
+            syncSettingsUI();
+        }, 60 * 1000);
 
         function syncNameEditUI() {
             const inp = $("name");
@@ -1563,28 +1633,35 @@
             if (state !== "over") scrollX += SPEED * dt;
             if (stormActive) {
                 stormTimer -= dt;
-                lightningTimer -= dt;
                 lightningFlash = Math.max(0, lightningFlash - dt);
                 stormIntensity = Math.min(1, (stormDuration - stormTimer) / 2, stormTimer / 2);
-                if (lightningTimer <= 0 && stormIntensity > 0.6) {
-                    lightningFlash = 0.16;
-                    lightningTimer = 3 + Math.random() * 5;
+                if (detectThunderSound()) {
+                    lightningFlash = 0.24;
+                    const hitsPlane = state === "play" && Math.random() < 0.05;
+                    lightningX = hitsPlane ? bird.x : 35 + Math.random() * (W - 70);
+                    lightningTargetY = hitsPlane ? bird.y : 245;
+                    if (hitsPlane) die(bird.x, bird.y);
                 }
                 if (stormTimer <= 0) {
-                    stormActive = false;
-                    stormIntensity = 0;
-                    weatherTimer = 45 + Math.random() * 75;
-                    lightningFlash = 0;
+                    if (ALWAYS_RAIN_FOR_TESTING) {
+                        stormDuration = 20;
+                        stormTimer = stormDuration;
+                    } else {
+                        stormActive = false;
+                        stormIntensity = 0;
+                        weatherTimer = 45 + Math.random() * 75;
+                        lightningFlash = 0;
+                    }
                 }
-            } else {
+            } else if (!ALWAYS_RAIN_FOR_TESTING) {
                 weatherTimer -= dt;
                 if (weatherTimer <= 0) {
                     stormActive = true;
                     stormDuration = 20;
                     stormTimer = stormDuration;
-                    lightningTimer = 3 + Math.random() * 4;
                 }
             }
+            updateThunderAudio();
             if (stormActive) {
                 for (const drop of rainDrops) {
                     drop.x -= 35 * dt;
@@ -1640,8 +1717,9 @@
                     const hitBottom = by + r > bottomY;
                     if (bx + r > p.x && bx - r < p.x + PIPE_W && (hitTop || hitBottom)) {
                         const impactX = Math.max(p.x, Math.min(p.x + PIPE_W, bx));
+                        const impactY = hitTop ? p.top : bottomY;
                         if (hitTop) {
-                            p.topScorch = { x: impactX - p.x, y: p.top + 4 };
+                            p.topScorch = { x: impactX - p.x, y: impactY + 4 };
                         } else {
                             p.bottomScorch = { x: impactX - p.x, y: 0 };
                         }
@@ -1989,6 +2067,25 @@
                 if (lightningFlash > 0) {
                     ctx.fillStyle = `rgba(230, 240, 255, ${lightningFlash * 2.5 * stormIntensity})`;
                     ctx.fillRect(0, 0, W, skyH);
+                    ctx.save();
+                    ctx.globalAlpha = Math.min(1, lightningFlash * 7) * stormIntensity;
+                    ctx.beginPath();
+                    ctx.moveTo(lightningX, 0);
+                    ctx.lineTo(lightningX - 13, lightningTargetY * 0.3);
+                    ctx.lineTo(lightningX + 5, lightningTargetY * 0.28);
+                    ctx.lineTo(lightningX - 22, lightningTargetY * 0.65);
+                    ctx.lineTo(lightningX - 5, lightningTargetY * 0.62);
+                    ctx.lineTo(lightningX, lightningTargetY);
+                    ctx.strokeStyle = "#b8eaff";
+                    ctx.lineWidth = 8;
+                    ctx.shadowColor = "#d8f4ff";
+                    ctx.shadowBlur = 22;
+                    ctx.stroke();
+                    ctx.strokeStyle = "#ffffff";
+                    ctx.lineWidth = 3;
+                    ctx.shadowBlur = 8;
+                    ctx.stroke();
+                    ctx.restore();
                 }
             }
 
@@ -2163,7 +2260,8 @@
         let last = performance.now();
         function loop(now) {
             const dt = Math.min(0.033, (now - last) / 1000); last = now;
-            update(dt); draw();
+            update(dt);
+            draw();
             requestAnimationFrame(loop);
         }
         requestAnimationFrame(loop);
